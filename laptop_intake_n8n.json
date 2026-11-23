@@ -1,0 +1,642 @@
+{
+  "name": "Экспресс-диагностика ноутбуков при скупке (эп. 53)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "laptop-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Приёмка с флешки",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "c8d64f03-9725-5d80-a72b-8be11f2b6170",
+      "notes": "Сюда collect_telemetry.py шлёт POST с заголовком X-Radar-Token. Адрес вебхука открывается наружу через Cloudflare Tunnel; без токена данные отбрасываются."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Проверка токена приёмки и разбор данных с флешки. Чужие и битые данные отбрасываются. Нужен модуль crypto (NODE_FUNCTION_ALLOW_BUILTIN).\nconst crypto = require('crypto');\nconst hdr = String(($json.headers && $json.headers['x-radar-token']) || '');\nconst need = String($env.INTAKE_TOKEN || '');\nconst same = need.length >= 16 && hdr.length === need.length && crypto.timingSafeEqual(Buffer.from(hdr), Buffer.from(need));\nif (!same) return { json: { auth: false, valid: false, errors: ['неверный токен'] } };\nconst b = $json.body && typeof $json.body === 'object' ? $json.body : {};\nconst clean = (s) => String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 40);\nconst text = (s) => String(s == null ? '' : s).replace(/[^\\wА-Яа-я .,+()\\/-]/g, '').slice(0, 60);\nconst num = (x, lo, hi) => { const n = Number(x); return x === null || x === undefined || x === '' || !Number.isFinite(n) ? null : Math.min(hi, Math.max(lo, n)); };\nconst board = clean(b.board_serial), chassis = clean(b.chassis_serial), sticker = clean(b.sticker_serial);\nconst errors = [];\nif (!board) errors.push('нет серийника платы');\nif (!chassis) errors.push('нет прошитого серийника системы');\nif (!sticker) errors.push('нет серийника с наклейки');\nconst bat = b.battery || {}, ssd = b.ssd || {}, fl = b.flags || {};\nconst device = {\n  board_serial: board, chassis_serial: chassis, sticker_serial: sticker,\n  serial_match: !!sticker && sticker === chassis,\n  model: text(b.model), bios_vendor: text(b.bios_vendor), bios_version: text(b.bios_version),\n  battery_wear_pct: num(bat.wear_pct, 0, 100), battery_cycles: num(bat.cycles, 0, 100000),\n  ssd_health_pct: num(ssd.health_pct, 0, 100), ssd_kind: text(ssd.kind), ssd_passed: typeof ssd.passed === 'boolean' ? ssd.passed : null,\n  flags: {\n    checked: fl.checked === true,\n    mdm_enrollment_keys: num(fl.mdm_enrollment_keys, 0, 1000),\n    autopilot_keys: num(fl.autopilot_keys, 0, 1000),\n    acpi_msdm: typeof fl.acpi_msdm === 'boolean' ? fl.acpi_msdm : null,\n    reason: text(fl.reason),\n  },\n};\nreturn { json: { auth: true, valid: errors.length === 0, errors, device, serials: [board, chassis, sticker].filter(Boolean).join(',') } };\n"
+      },
+      "name": "Принять и проверить данные",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "f885eccd-166c-599a-98ba-aef057d6a16c",
+      "notes": "Why Code: сравнение токена без утечки по времени и очистка серийников. Нужен модуль crypto (NODE_FUNCTION_ALLOW_BUILTIN)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.auth }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Токен верен?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        0
+      ],
+      "id": "4924d23d-18ac-57ec-a94a-f7b4a6720186"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'unauthorized' }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "name": "Ответ 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        160
+      ],
+      "id": "2090e24b-9b5d-5e01-8639-633b7ac7b27c"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Данные полные?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "71efff59-8a37-553f-a9e1-984f635346e8"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'bad_payload', details: $json.errors }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "name": "Ответ 400",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        960,
+        160
+      ],
+      "id": "216ab958-e682-51c7-9d40-3b5dd2fd7946"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT (SELECT reason FROM stop_list WHERE serial = ANY(string_to_array($1, ',')) LIMIT 1) AS stop_reason, (SELECT base_price FROM price_rules WHERE $2 ILIKE model_pattern ORDER BY length(model_pattern) DESC LIMIT 1) AS base_price;",
+        "options": {
+          "queryReplacement": "={{ [ $json.serials, $json.device.model ] }}"
+        }
+      },
+      "name": "Стоп-лист и цена",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        960,
+        0
+      ],
+      "id": "b24e4f5d-8bae-55dc-a299-1f09f1aa7175",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Intake PostgreSQL"
+        }
+      },
+      "notes": "Серийники сверяются со стоп-листом, цена берётся по маске модели из price_rules. Сами цены и стоп-лист заполняете вы.",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Решение по сделке: запрет, ручная проверка или лимит цены. Система только ВЫЯВЛЯЕТ корпоративные следы и не снимает блокировки.\n// Отсутствие следов при непроверенных флагах не считается «чисто»: такой ноутбук уходит на ручную проверку.\nconst src = $('Принять и проверить данные').item.json;\nconst d = src.device;\nconst stopReason = $json.stop_reason || null;\nconst base = $json.base_price === null || $json.base_price === undefined ? null : Number($json.base_price);\nconst reasons = [];\nlet forbidden = false, review = false;\nif (stopReason) { forbidden = true; reasons.push('серийник в стоп-листе: ' + stopReason); }\nif (!d.serial_match) { forbidden = true; reasons.push('серийник на наклейке не совпал с прошитым в плату: возможна замена платы'); }\nif ((d.flags.mdm_enrollment_keys || 0) > 0) { forbidden = true; reasons.push('найдены следы корпоративной привязки MDM'); }\nif ((d.flags.autopilot_keys || 0) > 0) { forbidden = true; reasons.push('найдены следы Windows Autopilot'); }\nif (!d.flags.checked) { review = true; reasons.push('офлайн-признаки MDM и Autopilot не проверены' + (d.flags.reason ? ' (' + d.flags.reason + ')' : '')); }\nif (d.battery_wear_pct === null) { review = true; reasons.push('износ батареи не прочитан'); }\nif (d.ssd_health_pct === null) { review = true; reasons.push('состояние SSD не прочитано'); }\nelse if (d.ssd_passed === false || d.ssd_health_pct < 50) { review = true; reasons.push('SSD в плохом состоянии: ' + d.ssd_health_pct + '%'); }\nif (base === null) { review = true; reasons.push('для модели нет цены в price_rules'); }\nconst cb = d.battery_wear_pct === null ? 0 : (d.battery_wear_pct <= 20 ? 0 : d.battery_wear_pct <= 40 ? 0.05 : d.battery_wear_pct <= 60 ? 0.12 : 0.25);\nconst cs = d.ssd_health_pct === null ? 0 : (d.ssd_health_pct >= 90 ? 0 : d.ssd_health_pct >= 80 ? 0.05 : d.ssd_health_pct >= 60 ? 0.15 : 0.35);\nconst formula = base === null ? null : Math.round(base * (1 - cb) * (1 - cs) / 100) * 100;\nconst verdict = forbidden ? 'forbidden' : (review ? 'review' : 'allow');\nreturn { json: { device: d, verdict, reasons, base_price: base, price_formula: forbidden ? null : formula, coef_battery: cb, coef_ssd: cs } };\n"
+      },
+      "name": "Оценить сделку",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        0
+      ],
+      "id": "823de163-f78a-5d23-af0d-fd2da45eee20",
+      "notes": "Следы MDM и Autopilot, несовпадение серийника или стоп-лист дают запрет. Непроверенные флаги дают ручную проверку, а не «чисто». Блокировки система не снимает."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.verdict }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "allow"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Цену считать?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        0
+      ],
+      "id": "541f5ec7-dcc7-5004-b725-b090c36a4832"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// В модель уходят только числа расчёта: серийники, текст страницы и данные продавца не передаются.\nconst d = $json;\nconst prompt = 'Ты помощник приёмщика техники при скупке. Ниже числа диагностики ноутбука и цена по формуле. Верни ТОЛЬКО JSON вида {\"extra_discount_pct\": число от 0 до 15, \"note\": \"одно короткое предложение по-русски\"}. extra_discount_pct это дополнительная уценка поверх формулы, только если износ батареи или состояние SSD явно хуже типичного для такой цены; иначе 0. Не придумывай факты.\\n\\nИзнос батареи, %: ' + d.device.battery_wear_pct + '\\nЦиклов батареи: ' + (d.device.battery_cycles === null ? 'нет данных' : d.device.battery_cycles) + '\\nЗдоровье SSD, %: ' + d.device.ssd_health_pct + '\\nБазовая цена, руб.: ' + d.base_price + '\\nЦена по формуле, руб.: ' + d.price_formula;\nreturn { json: { ...d, prompt } };\n"
+      },
+      "name": "Подготовить запрос к Ollama",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        -120
+      ],
+      "id": "8d5099fd-13bc-57a4-ba58-c992261de18d",
+      "notes": "В модель уходят только числа: износ батареи, здоровье SSD, цены. Серийники и данные продавца не передаются."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL, prompt: $json.prompt, stream: false, format: 'json', options: { temperature: 0.1 } }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "name": "Ollama дополнительная уценка",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1920,
+        -120
+      ],
+      "id": "ade42a5a-6435-560c-be58-01f27ca78afe",
+      "notes": "Локальная модель на вашем сервере. Качество расчёта не проверялось. Если Ollama недоступна или ответ битый, уценка модели 0%, цена берётся по формуле.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Итог с расчётом Ollama: дополнительная уценка модели ограничена диапазоном 0-15%, битый ответ даёт 0%. Решение о цене остаётся за человеком.\nconst d = $('Подготовить запрос к Ollama').item.json;\nlet extra = 0, note = '';\ntry {\n  const j = JSON.parse(String($json.response || '{}'));\n  const n = Number(j.extra_discount_pct);\n  extra = Number.isFinite(n) ? Math.min(15, Math.max(0, n)) : 0;\n  note = String(j.note || '').replace(/[\\r\\n]+/g, ' ').slice(0, 240);\n} catch (e) { extra = 0; note = ''; }\nconst limit = Math.round(d.price_formula * (1 - extra / 100) / 100) * 100;\nconst lines = [\n  'Ноутбук ' + (d.device.model || 'без модели') + ' · ' + d.device.board_serial,\n  'АКБ износ ' + d.device.battery_wear_pct + '% · SSD ' + d.device.ssd_health_pct + '% · флагов MDM и Autopilot не найдено',\n  'Лимит цены: до ' + String(limit).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ' ') + ' ₽ (формула ' + d.price_formula + ' ₽, уценка Ollama ' + extra + '%)',\n];\nif (note) lines.push('Заметка модели: ' + note);\nlines.push('Пример расчёта: решение о цене за человеком.');\nreturn { json: { device: d.device, verdict: 'allow', reasons: d.reasons, base_price: d.base_price, price_limit: limit, extra_discount_pct: extra, ollama_note: note, text: lines.join('\\n') } };\n"
+      },
+      "name": "Итог с Ollama",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        -120
+      ],
+      "id": "5fa34289-74b0-56e6-b8d2-13a80f7a607d",
+      "notes": "Дополнительная уценка модели ограничена диапазоном 0-15%."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Итог без расчёта Ollama: запрет или ручная проверка. Блокировки не снимаются и не обходятся, система только сообщает о найденных следах.\nconst d = $json;\nconst head = d.verdict === 'forbidden' ? 'СДЕЛКА ЗАПРЕЩЕНА' : 'Нужна ручная проверка';\nconst text = head + ': ' + (d.device.model || 'без модели') + ' · ' + d.device.board_serial + '\\n' + d.reasons.map((r) => '- ' + r).join('\\n') + (d.verdict === 'forbidden' ? '\\nЦену не называть. Передать решение руководителю приёмки.' : '\\nДо проверки цену не называть.');\nreturn { json: { device: d.device, verdict: d.verdict, reasons: d.reasons, base_price: d.base_price, price_limit: null, extra_discount_pct: 0, ollama_note: '', text } };\n"
+      },
+      "name": "Итог без Ollama",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        160
+      ],
+      "id": "c9e5c17f-fddd-5e83-97a4-bbfd15bed967"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO devices (board_serial, chassis_serial, sticker_serial, serial_match, model, bios_vendor, bios_version, battery_wear_pct, battery_cycles, ssd_health_pct, ssd_kind, flags, verdict, reasons, base_price, price_limit, extra_discount_pct, ollama_note) VALUES ($1, $2, $3, $4::boolean, $5, $6, $7, $8::numeric, $9::int, $10::numeric, $11, $12::jsonb, $13, $14::jsonb, $15::int, $16::int, $17::numeric, $18) RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.device.board_serial, $json.device.chassis_serial, $json.device.sticker_serial, $json.device.serial_match, $json.device.model, $json.device.bios_vendor, $json.device.bios_version, $json.device.battery_wear_pct, $json.device.battery_cycles, $json.device.ssd_health_pct, $json.device.ssd_kind, JSON.stringify($json.device.flags), $json.verdict, JSON.stringify($json.reasons), $json.base_price, $json.price_limit, $json.extra_discount_pct, $json.ollama_note ] }}"
+        }
+      },
+      "name": "Записать приёмку",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2400,
+        0
+      ],
+      "id": "b600eb47-cf9b-5ebb-8eb5-9ea8c5e25c63",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Intake PostgreSQL"
+        }
+      },
+      "notes": "Каждая приёмка пишется в журнал devices: серийники, показания, флаги, вердикт и причины.",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Итог берётся из той ветки, которая выполнялась (с Ollama или без).\nlet f;\ntry { f = $('Итог с Ollama').item.json; } catch (e) { f = $('Итог без Ollama').item.json; }\nreturn { json: { ...f, id: $json.id || null } };"
+      },
+      "name": "Собрать ответ",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        0
+      ],
+      "id": "f2f1967b-b4a5-5f0f-ab65-dc049ae5a3dc"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.ADMIN_CHAT_ID }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Карточка в Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2880,
+        0
+      ],
+      "id": "50bbd7dd-18cb-50d6-af29-e00d9ac86e29",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot"
+        }
+      },
+      "notes": "Карточка с лимитом цены, ручной проверкой или запретом сделки уходит в чат приёмки.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ id: $('Собрать ответ').item.json.id, verdict: $('Собрать ответ').item.json.verdict, price_limit: $('Собрать ответ').item.json.price_limit, reasons: $('Собрать ответ').item.json.reasons }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "name": "Ответ скрипту",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3120,
+        0
+      ],
+      "id": "60ae6b4f-b08b-5132-a657-d0dcc8aaafb6",
+      "notes": "Скрипт на флешке печатает вердикт на экране ноутбука."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "10 3 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Каждую ночь 03:10",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        520
+      ],
+      "id": "41f4e46d-7ea0-5242-855d-add3e92fbdac"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, created_at, model, board_serial, verdict, price_limit, reasons FROM devices WHERE created_at > now() - interval '24 hours' ORDER BY id;",
+        "options": {}
+      },
+      "name": "Журнал приёмок за сутки",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        240,
+        520
+      ],
+      "id": "70978eab-8940-5c9a-b99e-53c77ca127ff",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Intake PostgreSQL"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "toJson",
+        "mode": "once",
+        "options": {
+          "fileName": "=intake_{{ $now.toFormat('yyyyLLdd') }}.json"
+        }
+      },
+      "name": "В файл JSON",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        520
+      ],
+      "id": "d71a7eef-b2b0-552a-b9ac-3b088458d398"
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/backups/intake_{{ $now.toFormat('yyyyLLdd') }}.json",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "name": "Записать в /backups",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        720,
+        520
+      ],
+      "id": "d902fcac-5b5b-5dc0-a2ae-eb7713a68c9e",
+      "notes": "Выгрузка журнала приёмок в том backups. Полная копия базы оценок делается backup.sh (правило 3-2-1)."
+    }
+  ],
+  "connections": {
+    "Приёмка с флешки": {
+      "main": [
+        [
+          {
+            "node": "Принять и проверить данные",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Принять и проверить данные": {
+      "main": [
+        [
+          {
+            "node": "Токен верен?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Токен верен?": {
+      "main": [
+        [
+          {
+            "node": "Данные полные?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ответ 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Данные полные?": {
+      "main": [
+        [
+          {
+            "node": "Стоп-лист и цена",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ответ 400",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Стоп-лист и цена": {
+      "main": [
+        [
+          {
+            "node": "Оценить сделку",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Оценить сделку": {
+      "main": [
+        [
+          {
+            "node": "Цену считать?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Цену считать?": {
+      "main": [
+        [
+          {
+            "node": "Подготовить запрос к Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Итог без Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Подготовить запрос к Ollama": {
+      "main": [
+        [
+          {
+            "node": "Ollama дополнительная уценка",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama дополнительная уценка": {
+      "main": [
+        [
+          {
+            "node": "Итог с Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Итог с Ollama": {
+      "main": [
+        [
+          {
+            "node": "Записать приёмку",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Итог без Ollama": {
+      "main": [
+        [
+          {
+            "node": "Записать приёмку",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Записать приёмку": {
+      "main": [
+        [
+          {
+            "node": "Собрать ответ",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Собрать ответ": {
+      "main": [
+        [
+          {
+            "node": "Карточка в Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Карточка в Telegram": {
+      "main": [
+        [
+          {
+            "node": "Ответ скрипту",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Каждую ночь 03:10": {
+      "main": [
+        [
+          {
+            "node": "Журнал приёмок за сутки",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Журнал приёмок за сутки": {
+      "main": [
+        [
+          {
+            "node": "В файл JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "В файл JSON": {
+      "main": [
+        [
+          {
+            "node": "Записать в /backups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

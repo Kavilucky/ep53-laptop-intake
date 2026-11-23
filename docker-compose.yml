@@ -1,0 +1,74 @@
+# Экспресс-диагностика ноутбуков при скупке: n8n + PostgreSQL + Ollama + Cloudflare Tunnel (эпизод 53, пример, не проверен на живом сервере).
+# Теги образов закрепите после первого успешного запуска (docker compose images) и сверьте с документацией проектов.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data          # постоянный том: без него журнал приёмок, стоп-лист и цены исчезнут
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest                     # локальная нейросеть: расчёт уценки идёт на вашем сервере, данные не уходят в чужие облака
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama                   # после запуска: docker compose exec ollama ollama pull <модель из OLLAMA_MODEL>
+    # порт наружу не публикуется: n8n обращается к http://ollama:11434 по внутренней сети
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}   # задать один раз и не менять
+      N8N_HOST: ${HOST}
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${HOST}/
+      N8N_RESTRICT_FILE_ACCESS_TO: /backups
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"         # сценарий читает $env.ADMIN_CHAT_ID, OLLAMA_MODEL, INTAKE_TOKEN
+      NODE_FUNCTION_ALLOW_BUILTIN: "crypto"          # нужен узлу Code для сравнения токена приёмки
+      ADMIN_CHAT_ID: ${ADMIN_CHAT_ID}
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      INTAKE_TOKEN: ${INTAKE_TOKEN}
+      GENERIC_TIMEZONE: ${TZ}
+      TZ: ${TZ}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - backups:/backups                            # ночная выгрузка журнала приёмок
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}                # токен из Cloudflare Zero Trust; маршрут: ваш домен -> http://n8n:5678
+    depends_on:
+      - n8n
+    # Через туннель ноутбуки с флешки достают вебхук /webhook/laptop-intake без открытых портов на сервере.
+    # Защита вебхука: заголовок X-Radar-Token (INTAKE_TOKEN), входные данные очищаются в сценарии. Для редактора n8n закройте доступ правилами Cloudflare Access.
+    # Условия бесплатного Cloudflare Tunnel проверяйте на сайте Cloudflare.
+
+volumes:
+  pg_data:
+  n8n_data:
+  ollama_data:
+  backups:
